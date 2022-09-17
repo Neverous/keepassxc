@@ -19,6 +19,7 @@
 #include <QFileInfo>
 
 #include "Command.h"
+#include "LineReader.h"
 #include "Open.h"
 #include "TextStream.h"
 #include "Utils.h"
@@ -29,147 +30,191 @@
 #include "core/Tools.h"
 #include "crypto/Crypto.h"
 
+#ifdef WITH_XC_FDOSECRETS
+#include "fdosecrets/FdoSecretsPluginCLI.h"
+#endif
+
+#ifdef WITH_XC_SSHAGENT
+#include "sshagent/SSHAgent.h"
+#endif
+
 #if defined(WITH_ASAN) && defined(WITH_LSAN)
 #include <sanitizer/lsan_interface.h>
 #endif
 
-#if defined(USE_READLINE)
-#include <readline/history.h>
-#include <readline/readline.h>
+QString getPrompt(const Database* currentDatabase, bool withFdoSecrets = false, bool withSSHAgent = false)
+{
+    QString prompt;
+    if (withFdoSecrets || withSSHAgent) {
+        prompt += "[";
+#ifdef WITH_XC_FDOSECRETS
+        if (withFdoSecrets) {
+            prompt += "F";
+        }
 #endif
 
-class LineReader
-{
-public:
-    virtual ~LineReader() = default;
-    virtual QString readLine(QString prompt) = 0;
-    virtual bool isFinished() = 0;
-};
-
-class SimpleLineReader : public LineReader
-{
-public:
-    SimpleLineReader()
-        : inStream(stdin, QIODevice::ReadOnly)
-        , outStream(stdout, QIODevice::WriteOnly)
-        , finished(false)
-    {
-    }
-
-    QString readLine(QString prompt) override
-    {
-        outStream << prompt;
-        outStream.flush();
-        QString result = inStream.readLine();
-        if (result.isNull()) {
-            finished = true;
+#ifdef WITH_XC_SSHAGENT
+        if (withSSHAgent) {
+            prompt += "S";
         }
-        return result;
-    }
-
-    bool isFinished() override
-    {
-        return finished;
-    }
-
-private:
-    TextStream inStream;
-    TextStream outStream;
-    bool finished;
-};
-
-#if defined(USE_READLINE)
-class ReadlineLineReader : public LineReader
-{
-public:
-    ReadlineLineReader()
-        : finished(false)
-    {
-    }
-
-    QString readLine(QString prompt) override
-    {
-        char* result = readline(prompt.toStdString().c_str());
-        if (!result) {
-            finished = true;
-            return {};
-        }
-        add_history(result);
-        QString qstr(result);
-        free(result);
-        return qstr;
-    }
-
-    bool isFinished() override
-    {
-        return finished;
-    }
-
-private:
-    bool finished;
-};
 #endif
+        prompt += "] ";
+    }
 
-int enterInteractiveMode(const QStringList& arguments)
+    if (currentDatabase) {
+        prompt += currentDatabase->metadata()->name();
+        if (prompt.isEmpty()) {
+            prompt += QFileInfo(currentDatabase->filePath()).fileName();
+        }
+    }
+    prompt += "> ";
+    return prompt;
+}
+
+int enterInteractiveMode(QCoreApplication& app,
+                         const QStringList& arguments,
+                         bool withFdoSecrets = false,
+                         bool withSSHAgent = false)
 {
     auto& err = Utils::STDERR;
     // Replace command list with interactive version
     Commands::setupCommands(true);
 
     Open openCmd;
+
+    // Already read, here just to avoid unknown option errors
+#ifdef WITH_XC_FDOSECRETS
+    openCmd.options.append(Command::FdoSecretsOption);
+#endif
+#ifdef WITH_XC_SSHAGENT
+    openCmd.options.append(Command::SSHAgentOption);
+#endif
+
     QStringList openArgs(arguments);
     openArgs.removeFirst();
     if (openCmd.execute(openArgs) != EXIT_SUCCESS) {
         return EXIT_FAILURE;
     };
 
-    QScopedPointer<LineReader> reader;
-#if defined(USE_READLINE)
-    reader.reset(new ReadlineLineReader());
-#else
-    reader.reset(new SimpleLineReader());
-#endif
-
     QSharedPointer<Database> currentDatabase(openCmd.currentDatabase);
 
-    QString command;
-    while (true) {
-        QString prompt;
-        if (currentDatabase) {
-            prompt += currentDatabase->metadata()->name();
-            if (prompt.isEmpty()) {
-                prompt += QFileInfo(currentDatabase->filePath()).fileName();
-            }
-        }
-        prompt += "> ";
-        command = reader->readLine(prompt);
-        if (reader->isFinished()) {
-            break;
+    QString prompt = getPrompt(currentDatabase.data(), withFdoSecrets, withSSHAgent);
+
+    QScopedPointer<LineReader> reader;
+#if defined(USE_READLINE)
+    reader.reset(new ReadlineLineReader(prompt));
+#else
+    reader.reset(new SimpleLineReader(prompt));
+#endif
+
+#ifdef WITH_XC_FDOSECRETS
+    FdoSecretsPluginCLI* fdoSS;
+    if (withFdoSecrets) {
+        fdoSS = new FdoSecretsPluginCLI(reader.data());
+        QObject::connect(fdoSS, &FdoSecretsPlugin::error, [&err](const QString& message) {
+            err << QObject::tr("Error in FDO Secrets: %1").arg(message) << endl;
+        });
+
+        QObject::connect(
+            fdoSS, &FdoSecretsPlugin::requestShowNotification, [](const QString& message, const QString& title, int) {
+                Utils::STDOUT << endl << "FDO Secrets: " << title << endl << message << endl;
+            });
+
+        fdoSS->updateServiceState();
+        fdoSS->databaseUnlocked(currentDatabase->canonicalFilePath(), currentDatabase);
+    }
+#endif
+
+#ifdef WITH_XC_SSHAGENT
+    if (withSSHAgent) {
+        if (!sshAgent()->isEnabled()) {
+            err << QObject::tr("The SSH agent is not enabled.") << endl;
+            return EXIT_FAILURE;
         }
 
+        QObject::connect(sshAgent(), &SSHAgent::error, [&](const QString& message) {
+            err << QObject::tr("Could not add OpenSSH key to the agent: %1").arg(message) << endl;
+        });
+
+        sshAgent()->databaseUnlocked(currentDatabase);
+    }
+#endif
+
+    QObject::connect(reader.data(), &LineReader::finished, &app, QCoreApplication::quit);
+    QObject::connect(reader.data(), &LineReader::readLine, [&](const QString command) {
+        // Handle the input line
         QStringList args = Utils::splitCommandString(command);
         if (args.empty()) {
-            continue;
+            return;
         }
 
         auto cmd = Commands::getCommand(args[0]);
         if (!cmd) {
             err << QObject::tr("Unknown command %1").arg(args[0]) << Qt::endl;
-            continue;
+            return;
         } else if (cmd->name == "quit" || cmd->name == "exit") {
-            break;
+            app.quit();
+            return;
+        } else if (cmd->name == "open" || cmd->name == "close") {
+            // unregister current database
+            if (currentDatabase) {
+#ifdef WITH_XC_FDOSECRETS
+                if (withFdoSecrets) {
+                    fdoSS->unregisterDatabase(currentDatabase->canonicalFilePath());
+                }
+#endif
+
+#ifdef WITH_XC_SSHAGENT
+                if (withSSHAgent) {
+                    sshAgent()->databaseLocked(currentDatabase);
+                }
+#endif
+            }
         }
 
         cmd->currentDatabase.swap(currentDatabase);
         cmd->execute(args);
         currentDatabase.swap(cmd->currentDatabase);
-    }
+
+        if (cmd->name == "open") {
+            // register new database
+            if (currentDatabase) {
+#ifdef WITH_XC_FDOSECRETS
+                if (withFdoSecrets) {
+                    fdoSS->databaseUnlocked(currentDatabase->canonicalFilePath(), currentDatabase);
+                }
+#endif
+
+#ifdef WITH_XC_SSHAGENT
+                if (withSSHAgent) {
+                    sshAgent()->databaseUnlocked(currentDatabase);
+                }
+#endif
+            }
+        }
+
+        // Update prompt
+        prompt = getPrompt(currentDatabase.data(), withFdoSecrets, withSSHAgent);
+    });
+
+    auto ret = app.exec();
 
     if (currentDatabase) {
+#ifdef WITH_XC_FDOSECRETS
+        if (withFdoSecrets) {
+            fdoSS->unregisterDatabase(currentDatabase->canonicalFilePath());
+        }
+#endif
+
+#ifdef WITH_XC_SSHAGENT
+        if (withSSHAgent) {
+            sshAgent()->databaseLocked(currentDatabase);
+        }
+#endif
         currentDatabase->releaseData();
     }
 
-    return EXIT_SUCCESS;
+    return ret;
 }
 
 int main(int argc, char** argv)
@@ -206,6 +251,13 @@ int main(int argc, char** argv)
 
     QCommandLineOption debugInfoOption(QStringList() << "debug-info", QObject::tr("Displays debugging information."));
     parser.addOption(debugInfoOption);
+#ifdef WITH_XC_FDOSECRETS
+    parser.addOption(Command::FdoSecretsOption);
+#endif
+#ifdef WITH_XC_SSHAGENT
+    parser.addOption(Command::SSHAgentOption);
+#endif
+
     parser.addHelpOption();
     parser.addVersionOption();
     // TODO : use the setOptionsAfterPositionalArgumentsMode (Qt 5.6) function
@@ -227,9 +279,25 @@ int main(int argc, char** argv)
         parser.showHelp();
     }
 
+    const bool withFdoSecrets =
+#ifdef WITH_XC_FDOSECRETS
+        parser.isSet(Command::FdoSecretsOption)
+#else
+        false
+#endif
+        ;
+
+    const bool withSSHAgent =
+#ifdef WITH_XC_SSHAGENT
+        parser.isSet(Command::SSHAgentOption)
+#else
+        false
+#endif
+        ;
+
     QString commandName = parser.positionalArguments().at(0);
     if (commandName == "open") {
-        return enterInteractiveMode(arguments);
+        return enterInteractiveMode(app, arguments, withFdoSecrets, withSSHAgent);
     }
 
     auto command = Commands::getCommand(commandName);

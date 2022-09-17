@@ -55,6 +55,12 @@ public:
     static const QCommandLineOption KeyFileOption;
     static const QCommandLineOption NoPasswordOption;
     static const QCommandLineOption YubiKeyOption;
+#ifdef WITH_XC_FDOSECRETS
+    static const QCommandLineOption FdoSecretsOption;
+#endif
+#ifdef WITH_XC_SSHAGENT
+    static const QCommandLineOption SSHAgentOption;
+#endif
 };
 
 namespace Commands

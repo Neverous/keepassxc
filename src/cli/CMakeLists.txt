@@ -35,6 +35,7 @@ set(cli_SOURCES
         Generate.cpp
         Help.cpp
         Import.cpp
+        LineReader.cpp
         List.cpp
         Merge.cpp
         Move.cpp
@@ -54,11 +55,21 @@ if (READLINE_FOUND)
     target_link_libraries(cli ${Readline_LIBRARY})
 endif()
 
+if(WITH_XC_FDOSECRETS)
+    set(fdosecrets_LIB fdosecrets-cli)
+endif()
+
+if(WITH_XC_SSHAGENT)
+    set(sshagent_LIB sshagent)
+endif()
+
 add_executable(keepassxc-cli keepassxc-cli.cpp)
 target_link_libraries(keepassxc-cli
         ${GPGERROR_LIBRARIES}
         cli
-        keepassxc_core)
+        keepassxc_core
+        ${fdosecrets_LIB}
+        ${sshagent_LIB})
 
 install(TARGETS keepassxc-cli
         BUNDLE DESTINATION . COMPONENT Runtime

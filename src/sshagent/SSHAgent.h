@@ -23,6 +23,8 @@
 
 #include "OpenSSHKey.h"
 
+#include <QUuid>
+
 class KeeAgentSettings;
 class Database;
 

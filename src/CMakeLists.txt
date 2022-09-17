@@ -308,12 +308,12 @@ endif()
 
 add_subdirectory(sshagent)
 if(WITH_XC_SSHAGENT)
-    set(sshagent_LIB sshagent)
+    set(sshagent_LIB sshagent-gui)
 endif()
 
 add_subdirectory(fdosecrets)
 if(WITH_XC_FDOSECRETS)
-    set(fdosecrets_LIB fdosecrets)
+    set(fdosecrets_LIB fdosecrets-gui)
 endif()
 
 add_subdirectory(thirdparty)

@@ -70,6 +70,16 @@ const QCommandLineOption Command::YubiKeyOption =
     QCommandLineOption(QStringList() << "y" << "yubikey",
                        QObject::tr("Yubikey slot and optional serial used to access the database (e.g., 1:7370001)."),
                        QObject::tr("slot[:serial]"));
+#ifdef WITH_XC_FDOSECRETS
+const QCommandLineOption Command::FdoSecretsOption = QCommandLineOption(
+    QStringList() << "fdo-secrets",
+    QObject::tr("Run freedesktop.org Secret Storage Spec server side API while the database is open."));
+#endif
+#ifdef WITH_XC_SSHAGENT
+const QCommandLineOption Command::SSHAgentOption =
+    QCommandLineOption(QStringList() << "ssh-agent",
+                       QObject::tr("Run SSH Agent integration while the database is open."));
+#endif
 
 namespace
 {
